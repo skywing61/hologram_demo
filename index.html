@@ -4,29 +4,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dual-Eye Off-Axis Projection (Android WebView Client)</title>
+    <title>Dual-Eye Off-Axis (2D/3D Switch)</title>
     <style>
         body {
             margin: 0;
             overflow: hidden;
             background-color: #000;
-            font-family: monospace;
             touch-action: none;
-            /* Prevent default browser zoom and scroll behavior, important for touch operations */
-        }
-
-        #info {
-            position: absolute;
-            top: 10px;
-            left: 10px;
-            color: #0f0;
-            background: rgba(0, 0, 0, 0.8);
-            padding: 10px;
-            border: 1px solid #0f0;
-            z-index: 999;
-            pointer-events: none;
-            display: none;
-            /* Hide top-left UI */
+            /* Critical for touch */
         }
 
         #loading {
@@ -34,20 +19,9 @@
             top: 50%;
             left: 50%;
             transform: translate(-50%, -50%);
-            color: #424242;
-            display: none;
+            color: #888;
+            font-family: monospace;
             font-size: 1.2rem;
-            text-align: center;
-        }
-
-        /* Status hint for debugging */
-        #debug-status {
-            position: absolute;
-            bottom: 10px;
-            left: 10px;
-            color: #666;
-            font-size: 12px;
-            z-index: 50;
         }
     </style>
 
@@ -63,299 +37,235 @@
 
 <body>
 
-    <div id="info">
-        <h3 style="margin:0">Dual-Eye Off-Axis</h3>
-        <p>Android Client Mode</p>
-        <p>Head X: <span id="hx">0</span></p>
-        <p>Head Y: <span id="hy">0</span></p>
-    </div>
-
-    <div id="loading">Loading 3D Model...</div>
-    <!-- <div id="debug-status">Waiting for Android signal...</div> -->
+    <div id="loading">Loading Model...</div>
 
     <script type="module">
         import * as THREE from 'three';
         import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
-        // Global variables
-        let scene, renderer, camera;
-        let customModel;
+        // --- GLOBAL VARIABLES ---
+        let scene, renderer, camera, customModel;
 
-        // Interaction control variables
+        // State flags
+        let is3DMode = true; // Default to 3D split-screen
         let isDragging = false;
-        let previousMousePosition = { x: 0, y: 0 };
-        let lastTouchDistance = 0; // For two-finger zoom
+        let isPanning = false;
 
-        // === Parameters ===
-        const SCREEN_WIDTH = 20; // Virtual screen width in 3D world (baseline)
-        let virtualScreenHeight = 11.25; // Will be calculated dynamically based on window aspect ratio
+        // Input tracking
+        let prevMouse = { x: 0, y: 0 };
+        let lastTouchDist = 0;
+        let lastTouchCenter = { x: 0, y: 0 };
 
-        const OBSERVER_DISTANCE = 15;
-        const EYE_SEPARATION = 1.2;
+        // Configuration
+        const SCREEN_WIDTH = 20;
+        const OBSERVER_DIST = 15;
+        const EYE_SEP = 1.2;
+        let virtualScreenHeight = 11.25;
 
-        // Head position
-        const headPos = new THREE.Vector3(0, 0, OBSERVER_DISTANCE);
-        const targetHeadPos = new THREE.Vector3(0, 0, OBSERVER_DISTANCE);
+        // Head Position
+        const headPos = new THREE.Vector3(0, 0, OBSERVER_DIST);
+        const targetHeadPos = new THREE.Vector3(0, 0, OBSERVER_DIST);
 
         init();
         animate();
 
-        // === Init function ===
         function init() {
             renderer = new THREE.WebGLRenderer({ antialias: true });
             renderer.setSize(window.innerWidth, window.innerHeight);
             renderer.setPixelRatio(window.devicePixelRatio);
-            renderer.setScissorTest(true);
+            renderer.setScissorTest(true); // Must be enabled for split screen
             document.body.appendChild(renderer.domElement);
 
             scene = new THREE.Scene();
             scene.background = new THREE.Color(0xeeeeee);
 
-            // Lights
-            const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
-            scene.add(ambientLight);
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+
+            // Lighting
+            scene.add(new THREE.AmbientLight(0xffffff, 0.7));
             const dirLight = new THREE.DirectionalLight(0xffffff, 2);
             dirLight.position.set(5, 10, 7);
             scene.add(dirLight);
 
-            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
-
-            // Calculate correct height ratio on init
-            updateScreenDimensions();
-
-            setupScene();
-
-            // Add interaction listeners (mouse and touch)
-            addInteraction();
-
-            window.addEventListener('resize', onWindowResize);
-
-            // === Function exposed for Android WebView call ===
-            window.updateHeadPosition = function (x, y) {
-                // x, y expected to be normalized coordinates 0.0 ~ 1.0
-                // 0.5, 0.5 represents screen center
-
-                // Dynamically adjust sensitivity range based on screen size
-                // Let head movement range be slightly larger than screen size to increase parallax effect
-                const sensitivity = 2.0;
-                const SENSITIVITY_X = SCREEN_WIDTH * sensitivity;
-                const SENSITIVITY_Y = virtualScreenHeight * sensitivity;
-
-                // Update target position
-                targetHeadPos.x = (0.5 - x) * SENSITIVITY_X;
-                targetHeadPos.y = (0.5 - y) * SENSITIVITY_Y;
-            };
+            updateScreenDims();
+            loadModel();
+            addInputListeners();
+            window.addEventListener('resize', onResize);
         }
 
-        // === Update virtual screen height based on window size ===
-        function updateScreenDimensions() {
-            const aspect = window.innerHeight / window.innerWidth;
-            // Keep width at 20, calculate corresponding height based on aspect ratio
-            virtualScreenHeight = SCREEN_WIDTH * aspect;
-        }
+        // --- ANDROID INTERFACES ---
 
-        // === Added: Interaction control function ===
-        function addInteraction() {
-            const canvas = renderer.domElement;
+        // 1. Head Tracking Update
+        window.updateHeadPosition = function (x, y) {
+            const sensitivity = 2.0;
+            const rangeX = SCREEN_WIDTH * sensitivity;
+            const rangeY = virtualScreenHeight * sensitivity;
+            targetHeadPos.x = (0.5 - x) * rangeX;
+            targetHeadPos.y = (0.5 - y) * rangeY;
+        };
 
-            // --- Mouse Events ---
-            canvas.addEventListener('mousedown', (e) => {
-                isDragging = true;
-                previousMousePosition = { x: e.offsetX, y: e.offsetY };
-            });
+        // 2. 2D/3D Mode Switch (New)
+        window.switchMode = function (is3D) {
+            // Handle boolean or string input just in case
+            is3DMode = (is3D === true || is3D === "true");
+            console.log("Mode switched to:", is3DMode ? "3D" : "2D");
+        };
 
-            canvas.addEventListener('mousemove', (e) => {
-                if (!isDragging || !customModel) return;
-
-                const deltaMove = {
-                    x: e.offsetX - previousMousePosition.x,
-                    y: e.offsetY - previousMousePosition.y
-                };
-
-                // Rotate model (Y-axis left/right, X-axis up/down)
-                const rotateSpeed = 0.005;
-                customModel.rotation.y += deltaMove.x * rotateSpeed;
-                customModel.rotation.x += deltaMove.y * rotateSpeed;
-
-                previousMousePosition = { x: e.offsetX, y: e.offsetY };
-            });
-
-            canvas.addEventListener('mouseup', () => isDragging = false);
-            canvas.addEventListener('mouseleave', () => isDragging = false);
-
-            // Mouse wheel zoom
-            canvas.addEventListener('wheel', (e) => {
-                if (!customModel) return;
-                e.preventDefault(); // Prevent page scrolling
-
-                const scaleSpeed = 0.001;
-                // Limit zoom range to avoid disappearing or getting too large
-                const minScale = 1.0;
-                const maxScale = 100.0;
-
-                // Calculate factor based on wheel direction
-                // e.deltaY > 0 is scrolling down (zoom out), < 0 is up (zoom in)
-                let scaleFactor = 1 - e.deltaY * scaleSpeed;
-
-                // Apply zoom
-                const newScaleX = customModel.scale.x * scaleFactor;
-
-                // Simple range check (checking X-axis as representative)
-                if (newScaleX > minScale && newScaleX < maxScale) {
-                    customModel.scale.multiplyScalar(scaleFactor);
-                }
-            }, { passive: false });
-
-
-            // --- Touch Events (Support single-finger rotate, two-finger zoom) ---
-            canvas.addEventListener('touchstart', (e) => {
-                if (e.touches.length === 1) {
-                    isDragging = true;
-                    previousMousePosition = { x: e.touches[0].clientX, y: e.touches[0].clientY };
-                } else if (e.touches.length === 2) {
-                    isDragging = false; // Stop rotation on two fingers
-                    // Calculate initial two-finger distance
-                    const dx = e.touches[0].clientX - e.touches[1].clientX;
-                    const dy = e.touches[0].clientY - e.touches[1].clientY;
-                    lastTouchDistance = Math.sqrt(dx * dx + dy * dy);
-                }
-            }, { passive: false });
-
-            canvas.addEventListener('touchmove', (e) => {
-                if (!customModel) return;
-                e.preventDefault(); // Prevent page scrolling
-
-                if (e.touches.length === 1 && isDragging) {
-                    // Single-finger rotate
-                    const deltaMove = {
-                        x: e.touches[0].clientX - previousMousePosition.x,
-                        y: e.touches[0].clientY - previousMousePosition.y
-                    };
-
-                    const rotateSpeed = 0.005;
-                    customModel.rotation.y += deltaMove.x * rotateSpeed;
-                    customModel.rotation.x += deltaMove.y * rotateSpeed;
-
-                    previousMousePosition = { x: e.touches[0].clientX, y: e.touches[0].clientY };
-
-                } else if (e.touches.length === 2) {
-                    // Two-finger zoom
-                    const dx = e.touches[0].clientX - e.touches[1].clientX;
-                    const dy = e.touches[0].clientY - e.touches[1].clientY;
-                    const currentDistance = Math.sqrt(dx * dx + dy * dy);
-
-                    if (lastTouchDistance > 0) {
-                        const scaleFactor = currentDistance / lastTouchDistance;
-
-                        // Slightly smooth zoom
-                        const smoothFactor = 1 + (scaleFactor - 1) * 0.8;
-
-                        const minScale = 1.0;
-                        const maxScale = 100.0;
-                        const newScaleX = customModel.scale.x * smoothFactor;
-
-                        if (newScaleX > minScale && newScaleX < maxScale) {
-                            customModel.scale.multiplyScalar(smoothFactor);
-                        }
-                    }
-                    lastTouchDistance = currentDistance;
-                }
-            }, { passive: false });
-
-            canvas.addEventListener('touchend', () => {
-                isDragging = false;
-                lastTouchDistance = 0;
-            });
-        }
-
-        // === Core Render Loop ===
+        // --- RENDER LOOP ---
         function animate() {
             requestAnimationFrame(animate);
-
-            // Smooth movement (Lerp)
             headPos.lerp(targetHeadPos, 0.1);
 
-            // Update UI display (if #info is visible)
-            if (document.getElementById('info').style.display !== 'none') {
-                document.getElementById('hx').innerText = headPos.x.toFixed(2);
-                document.getElementById('hy').innerText = headPos.y.toFixed(2);
+            const w = window.innerWidth;
+            const h = window.innerHeight;
+
+            if (is3DMode) {
+                // --- 3D MODE: Split Screen ---
+                // Left Eye (Left half)
+                renderEye(headPos.x - (EYE_SEP / 2), 0, 0, w / 2, h);
+                // Right Eye (Right half)
+                renderEye(headPos.x + (EYE_SEP / 2), w / 2, 0, w / 2, h);
+            } else {
+                // --- 2D MODE: Full Screen (Left Eye Only) ---
+                // We use the Left Eye view but map it to the full window width
+                renderEye(headPos.x - (EYE_SEP / 2), 0, 0, w, h);
             }
+        }
 
-            const windowWidth = window.innerWidth;
-            const windowHeight = window.innerHeight;
+        function renderEye(eyeX, viewportX, viewportY, viewportW, viewportH) {
+            // Update camera matrix for Off-Axis projection
+            updateOffAxisProjection(camera, eyeX, headPos.y, headPos.z);
 
-            // Render Left Eye
-            const leftEyeX = headPos.x - (EYE_SEPARATION / 2);
-            updateOffAxisCamera(camera, leftEyeX, headPos.y, headPos.z);
-            renderer.setViewport(0, 0, windowWidth / 2, windowHeight);
-            renderer.setScissor(0, 0, windowWidth / 2, windowHeight);
-            renderer.render(scene, camera);
+            // Set viewport and scissor for this pass
+            renderer.setViewport(viewportX, viewportY, viewportW, viewportH);
+            renderer.setScissor(viewportX, viewportY, viewportW, viewportH);
 
-            // Render Right Eye
-            const rightEyeX = headPos.x + (EYE_SEPARATION / 2);
-            updateOffAxisCamera(camera, rightEyeX, headPos.y, headPos.z);
-            renderer.setViewport(windowWidth / 2, 0, windowWidth / 2, windowHeight);
-            renderer.setScissor(windowWidth / 2, 0, windowWidth / 2, windowHeight);
             renderer.render(scene, camera);
         }
 
-        function updateOffAxisCamera(cam, eyeX, eyeY, eyeZ) {
+        function updateOffAxisProjection(cam, eyeX, eyeY, eyeZ) {
             cam.position.set(eyeX, eyeY, eyeZ);
             cam.rotation.set(0, 0, 0);
             cam.updateMatrixWorld();
 
-            const screenRight = SCREEN_WIDTH / 2;
-            const screenLeft = -SCREEN_WIDTH / 2;
-            const screenTop = virtualScreenHeight / 2; // Use dynamically calculated height
-            const screenBottom = -virtualScreenHeight / 2;
-
             const near = 0.1;
             const far = 1000;
-            // Avoid divide-by-zero error if eyeZ is 0
-            const safeEyeZ = Math.max(eyeZ, 0.1);
-            const ratio = near / safeEyeZ;
+            const safeZ = Math.max(eyeZ, 0.1);
+            const ratio = near / safeZ;
 
-            const left = (screenLeft - eyeX) * ratio;
-            const right = (screenRight - eyeX) * ratio;
-            const top = (screenTop - eyeY) * ratio;
-            const bottom = (screenBottom - eyeY) * ratio;
+            const left = (-SCREEN_WIDTH / 2 - eyeX) * ratio;
+            const right = (SCREEN_WIDTH / 2 - eyeX) * ratio;
+            const top = (virtualScreenHeight / 2 - eyeY) * ratio;
+            const bottom = (-virtualScreenHeight / 2 - eyeY) * ratio;
 
             cam.projectionMatrix.makePerspective(left, right, top, bottom, near, far);
         }
 
-        function onWindowResize() {
-            renderer.setSize(window.innerWidth, window.innerHeight);
-            updateScreenDimensions(); // Recalculate 3D virtual screen height when window resizes
+        // --- HELPER FUNCTIONS ---
+        function updateScreenDims() {
+            const aspect = window.innerHeight / window.innerWidth;
+            virtualScreenHeight = SCREEN_WIDTH * aspect;
         }
 
-        function setupScene() {
+        function onResize() {
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            updateScreenDims();
+        }
+
+        function loadModel() {
             const loader = new GLTFLoader();
-            const loadingEl = document.getElementById('loading');
-            loadingEl.style.display = 'block';
+            loader.load('./source/Seen_low_2K.glb', (gltf) => {
+                customModel = gltf.scene;
+                customModel.scale.set(30, 30, 30);
+                customModel.position.set(-1, -2, -6);
+                customModel.rotation.y = 0.8;
+                scene.add(customModel);
+                document.getElementById('loading').style.display = 'none';
+            });
+        }
 
-            // Load model (relative path)
-            const modelUrl = './source/Seen_low_2K.glb';
+        // --- INPUT HANDLERS (Rotate, Zoom, Pan) ---
+        function addInputListeners() {
+            const cvs = renderer.domElement;
 
-            loader.load(
-                modelUrl,
-                function (gltf) {
-                    customModel = gltf.scene;
-                    // Adjust model position and scale
-                    const scale = 30.0;
-                    customModel.scale.set(scale, scale, scale);
-                    customModel.position.set(-1, -2, -6);
-                    customModel.rotation.y = 0.8;
-                    scene.add(customModel);
+            // Mouse
+            cvs.addEventListener('mousedown', e => {
+                prevMouse = { x: e.offsetX, y: e.offsetY };
+                if (e.button === 0) isDragging = true;
+                else if (e.button === 1) { isPanning = true; e.preventDefault(); }
+            });
 
-                    loadingEl.style.display = 'none';
-                    console.log("Model loaded!");
-                },
-                undefined,
-                function (error) {
-                    console.error(error);
-                    loadingEl.innerText = "Model failed to load (Please check file location)";
+            cvs.addEventListener('mouseup', () => { isDragging = false; isPanning = false; });
+            cvs.addEventListener('mouseleave', () => { isDragging = false; isPanning = false; });
+
+            cvs.addEventListener('mousemove', e => {
+                const deltaX = e.offsetX - prevMouse.x;
+                const deltaY = e.offsetY - prevMouse.y;
+                if (isDragging) handleRotate(deltaX, deltaY);
+                else if (isPanning) handlePan(deltaX, deltaY);
+                prevMouse = { x: e.offsetX, y: e.offsetY };
+            });
+
+            cvs.addEventListener('wheel', e => handleZoom(e.deltaY), { passive: false });
+
+            // Touch
+            cvs.addEventListener('touchstart', e => {
+                if (e.touches.length === 1) {
+                    isDragging = true; isPanning = false;
+                    prevMouse = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+                } else if (e.touches.length === 2) {
+                    isDragging = false; isPanning = true;
+                    const dx = e.touches[0].clientX - e.touches[1].clientX;
+                    const dy = e.touches[0].clientY - e.touches[1].clientY;
+                    lastTouchDist = Math.sqrt(dx * dx + dy * dy);
+                    lastTouchCenter = {
+                        x: (e.touches[0].clientX + e.touches[1].clientX) / 2,
+                        y: (e.touches[0].clientY + e.touches[1].clientY) / 2
+                    };
                 }
-            );
+            }, { passive: false });
+
+            cvs.addEventListener('touchmove', e => {
+                e.preventDefault();
+                if (e.touches.length === 1 && isDragging) {
+                    const deltaX = e.touches[0].clientX - prevMouse.x;
+                    const deltaY = e.touches[0].clientY - prevMouse.y;
+                    handleRotate(deltaX, deltaY);
+                    prevMouse = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+                } else if (e.touches.length === 2 && isPanning) {
+                    const dx = e.touches[0].clientX - e.touches[1].clientX;
+                    const dy = e.touches[0].clientY - e.touches[1].clientY;
+                    const currentDist = Math.sqrt(dx * dx + dy * dy);
+                    if (lastTouchDist > 0) handleZoom((lastTouchDist - currentDist) * 5);
+                    lastTouchDist = currentDist;
+
+                    const currentCenterX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+                    const currentCenterY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+                    handlePan(currentCenterX - lastTouchCenter.x, currentCenterY - lastTouchCenter.y);
+                    lastTouchCenter = { x: currentCenterX, y: currentCenterY };
+                }
+            }, { passive: false });
+
+            cvs.addEventListener('touchend', () => { isDragging = false; isPanning = false; lastTouchDist = 0; });
+        }
+
+        function handleRotate(dx, dy) {
+            if (!customModel) return;
+            customModel.rotation.y += dx * 0.005;
+            customModel.rotation.x += dy * 0.005;
+        }
+
+        function handlePan(dx, dy) {
+            if (!customModel) return;
+            customModel.position.x += dx * 0.02;
+            customModel.position.y -= dy * 0.02;
+        }
+
+        function handleZoom(delta) {
+            if (!customModel) return;
+            const scaleFactor = 1 - delta * 0.001;
+            const newScale = customModel.scale.x * scaleFactor;
+            if (newScale > 0.1 && newScale < 100) customModel.scale.multiplyScalar(scaleFactor);
         }
     </script>
 </body>
