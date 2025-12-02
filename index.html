@@ -268,11 +268,6 @@
                 document.getElementById('hy').innerText = headPos.y.toFixed(2);
             }
 
-            // 預先旋轉
-            if (customModel) {
-                customModel.rotation.y = 0.8;
-            }
-
             const windowWidth = window.innerWidth;
             const windowHeight = window.innerHeight;
 
@@ -335,6 +330,7 @@
                     const scale = 30.0;
                     customModel.scale.set(scale, scale * 0.6, scale);
                     customModel.position.set(-1, -1, -5);
+                    customModel.rotation.y = 0.8;
                     scene.add(customModel);
 
                     loadingEl.style.display = 'none';
@@ -346,12 +342,6 @@
                     loadingEl.innerText = "模型載入失敗 (請確認檔案位置)";
                 }
             );
-        }
-
-        function updateSceneAnimations() {
-            if (customModel) {
-                customModel.rotation.y += 0.005;
-            }
         }
     </script>
 </body>
