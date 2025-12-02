@@ -268,10 +268,10 @@
                 document.getElementById('hy').innerText = headPos.y.toFixed(2);
             }
 
-            // --- 注意：已移除原本的自動旋轉，改由使用者手動控制 ---
-            // if (customModel) {
-            //      customModel.rotation.y = 0.8; 
-            // }
+            // 預先旋轉
+            if (customModel) {
+                customModel.rotation.y = 0.8;
+            }
 
             const windowWidth = window.innerWidth;
             const windowHeight = window.innerHeight;
