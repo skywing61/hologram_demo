@@ -9,7 +9,7 @@
         body {
             margin: 0;
             overflow: hidden;
-            background-color: #000;
+            background-color: #fff;
             touch-action: none;
             /* Critical for touch */
         }
@@ -95,7 +95,7 @@
 
         // --- ANDROID INTERFACES ---
 
-        // 1. Head Tracking Update
+        // Head Tracking Update
         window.updateHeadPosition = function (x, y) {
             const sensitivity = 2.0;
             const rangeX = SCREEN_WIDTH * sensitivity;
@@ -104,7 +104,7 @@
             targetHeadPos.y = (0.5 - y) * rangeY;
         };
 
-        // 2. 2D/3D Mode Switch (New)
+        // 2D/3D Mode Switch
         window.switchMode = function (is3D) {
             // Handle boolean or string input just in case
             is3DMode = (is3D === true || is3D === "true");
