@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>雙眼離軸投影 (Android WebView Client)</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000;
+            font-family: monospace;
+        }
+
+        #info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: #0f0;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 10px;
+            border: 1px solid #0f0;
+            z-index: 999;
+            pointer-events: none;
+            display: none;
+            /* 隱藏左上角 UI */
+        }
+
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: cyan;
+            display: none;
+            font-size: 1.2rem;
+            text-align: center;
+        }
+
+        /* 狀態提示，方便除錯 */
+        #debug-status {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            color: #666;
+            font-size: 12px;
+            z-index: 50;
+        }
+    </style>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+</head>
+
+<body>
+
+    <div id="info">
+        <h3 style="margin:0">Dual-Eye Off-Axis</h3>
+        <p>Android Client Mode</p>
+        <p>Head X: <span id="hx">0</span></p>
+        <p>Head Y: <span id="hy">0</span></p>
+    </div>
+
+    <div id="loading">載入 3D 模型中...</div>
+    <!-- <div id="debug-status">等待 Android 訊號...</div> -->
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+        // 全域變數宣告
+        let scene, renderer, camera;
+        let customModel;
+
+        // === 設定參數 ===
+        const SCREEN_WIDTH = 20;
+        const SCREEN_HEIGHT = 11.25;
+        const OBSERVER_DISTANCE = 15;
+        const EYE_SEPARATION = 1.2;
+
+        // 頭部位置
+        const headPos = new THREE.Vector3(0, 0, OBSERVER_DISTANCE);
+        const targetHeadPos = new THREE.Vector3(0, 0, OBSERVER_DISTANCE);
+
+        init();
+        animate();
+
+        // === 初始化函式 ===
+        function init() {
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setScissorTest(true);
+            document.body.appendChild(renderer.domElement);
+
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0xeeeeee);
+
+            // 燈光
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+            scene.add(ambientLight);
+            const dirLight = new THREE.DirectionalLight(0xffffff, 2);
+            dirLight.position.set(5, 10, 7);
+            scene.add(dirLight);
+
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+
+            setupScene();
+
+            window.addEventListener('resize', onWindowResize);
+
+            // === 暴露給 Android WebView 呼叫的函式 ===
+            window.updateHeadPosition = function (x, y) {
+                // x, y 預期為 0.0 ~ 1.0 的正規化座標
+                // 0.5, 0.5 代表螢幕中心
+
+                const sensitivity = 2.0;
+                const SENSITIVITY_X = SCREEN_WIDTH * sensitivity;
+                const SENSITIVITY_Y = SCREEN_HEIGHT * sensitivity;
+
+                // 更新目標位置
+                // 視情況調整正負號 (取決於 Android 前鏡頭是否有做鏡像翻轉)
+                // 這裡假設 x=0 是畫面左邊，x=1 是畫面右邊
+                // 當人往左(x變小)，投影需要往右修正，所以用 (0.5 - x)
+                targetHeadPos.x = (0.5 - x) * SENSITIVITY_X;
+                targetHeadPos.y = (0.5 - y) * SENSITIVITY_Y;
+
+                // 更新除錯文字
+                // document.getElementById('debug-status').innerText = `Input: ${x.toFixed(2)}, ${y.toFixed(2)}`;
+            };
+        }
+
+        // === 核心渲染迴圈 ===
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // 平滑移動 (Lerp)
+            headPos.lerp(targetHeadPos, 0.1);
+
+            // 更新 UI 顯示 (如果 #info 是顯示的)
+            if (document.getElementById('info').style.display !== 'none') {
+                document.getElementById('hx').innerText = headPos.x.toFixed(2);
+                document.getElementById('hy').innerText = headPos.y.toFixed(2);
+            }
+
+            // 更新模型自轉 (如果需要可以取消註解)
+            // updateSceneAnimations();
+            if (customModel) {
+                customModel.rotation.y = 0.8; // 固定角度或自轉
+                // customModel.rotation.y += 0.005; 
+            }
+
+            const windowWidth = window.innerWidth;
+            const windowHeight = window.innerHeight;
+
+            // 左眼渲染
+            const leftEyeX = headPos.x - (EYE_SEPARATION / 2);
+            updateOffAxisCamera(camera, leftEyeX, headPos.y, headPos.z);
+            renderer.setViewport(0, 0, windowWidth / 2, windowHeight);
+            renderer.setScissor(0, 0, windowWidth / 2, windowHeight);
+            renderer.render(scene, camera);
+
+            // 右眼渲染
+            const rightEyeX = headPos.x + (EYE_SEPARATION / 2);
+            updateOffAxisCamera(camera, rightEyeX, headPos.y, headPos.z);
+            renderer.setViewport(windowWidth / 2, 0, windowWidth / 2, windowHeight);
+            renderer.setScissor(windowWidth / 2, 0, windowWidth / 2, windowHeight);
+            renderer.render(scene, camera);
+        }
+
+        function updateOffAxisCamera(cam, eyeX, eyeY, eyeZ) {
+            cam.position.set(eyeX, eyeY, eyeZ);
+            cam.rotation.set(0, 0, 0);
+            cam.updateMatrixWorld();
+
+            const screenRight = SCREEN_WIDTH / 2;
+            const screenLeft = -SCREEN_WIDTH / 2;
+            const screenTop = SCREEN_HEIGHT / 2;
+            const screenBottom = -SCREEN_HEIGHT / 2;
+
+            const near = 0.1;
+            const far = 1000;
+            // 避免 eyeZ 為 0 導致除以零錯誤
+            const safeEyeZ = Math.max(eyeZ, 0.1);
+            const ratio = near / safeEyeZ;
+
+            const left = (screenLeft - eyeX) * ratio;
+            const right = (screenRight - eyeX) * ratio;
+            const top = (screenTop - eyeY) * ratio;
+            const bottom = (screenBottom - eyeY) * ratio;
+
+            cam.projectionMatrix.makePerspective(left, right, top, bottom, near, far);
+        }
+
+        function onWindowResize() {
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function setupScene() {
+            const loader = new GLTFLoader();
+            const loadingEl = document.getElementById('loading');
+            loadingEl.style.display = 'block';
+
+            // 載入模型 (相對路徑)
+            const modelUrl = './source/Seen_low_2K.glb';
+
+            loader.load(
+                modelUrl,
+                function (gltf) {
+                    customModel = gltf.scene;
+                    // 調整模型位置與大小
+                    const scale = 30.0;
+                    customModel.scale.set(scale, scale * 0.6, scale);
+                    customModel.position.set(-1, -2, -5);
+                    scene.add(customModel);
+
+                    loadingEl.style.display = 'none';
+                    console.log("Model loaded!");
+                },
+                undefined,
+                function (error) {
+                    console.error(error);
+                    loadingEl.innerText = "模型載入失敗 (請確認檔案位置)";
+                }
+            );
+        }
+
+        function updateSceneAnimations() {
+            if (customModel) {
+                customModel.rotation.y += 0.005;
+            }
+        }
+    </script>
+</body>
+
+</html>
