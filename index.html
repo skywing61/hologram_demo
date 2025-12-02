@@ -11,6 +11,8 @@
             overflow: hidden;
             background-color: #000;
             font-family: monospace;
+            touch-action: none;
+            /* 禁止瀏覽器預設的縮放與捲動行為，這對觸控操作很重要 */
         }
 
         #info {
@@ -79,6 +81,11 @@
         let scene, renderer, camera;
         let customModel;
 
+        // 互動控制變數
+        let isDragging = false;
+        let previousMousePosition = { x: 0, y: 0 };
+        let lastTouchDistance = 0; // 用於雙指縮放
+
         // === 設定參數 ===
         const SCREEN_WIDTH = 20;
         const SCREEN_HEIGHT = 11.25;
@@ -114,6 +121,9 @@
 
             setupScene();
 
+            // 加入互動監聽 (滑鼠與觸控)
+            addInteraction();
+
             window.addEventListener('resize', onWindowResize);
 
             // === 暴露給 Android WebView 呼叫的函式 ===
@@ -126,15 +136,123 @@
                 const SENSITIVITY_Y = SCREEN_HEIGHT * sensitivity;
 
                 // 更新目標位置
-                // 視情況調整正負號 (取決於 Android 前鏡頭是否有做鏡像翻轉)
-                // 這裡假設 x=0 是畫面左邊，x=1 是畫面右邊
-                // 當人往左(x變小)，投影需要往右修正，所以用 (0.5 - x)
                 targetHeadPos.x = (0.5 - x) * SENSITIVITY_X;
                 targetHeadPos.y = (0.5 - y) * SENSITIVITY_Y;
-
-                // 更新除錯文字
-                // document.getElementById('debug-status').innerText = `Input: ${x.toFixed(2)}, ${y.toFixed(2)}`;
             };
+        }
+
+        // === 新增：互動控制函式 ===
+        function addInteraction() {
+            const canvas = renderer.domElement;
+
+            // --- 滑鼠事件 ---
+            canvas.addEventListener('mousedown', (e) => {
+                isDragging = true;
+                previousMousePosition = { x: e.offsetX, y: e.offsetY };
+            });
+
+            canvas.addEventListener('mousemove', (e) => {
+                if (!isDragging || !customModel) return;
+
+                const deltaMove = {
+                    x: e.offsetX - previousMousePosition.x,
+                    y: e.offsetY - previousMousePosition.y
+                };
+
+                // 旋轉模型 (Y軸左右轉，X軸上下轉)
+                const rotateSpeed = 0.005;
+                customModel.rotation.y += deltaMove.x * rotateSpeed;
+                customModel.rotation.x += deltaMove.y * rotateSpeed;
+
+                previousMousePosition = { x: e.offsetX, y: e.offsetY };
+            });
+
+            canvas.addEventListener('mouseup', () => isDragging = false);
+            canvas.addEventListener('mouseleave', () => isDragging = false);
+
+            // 滑鼠滾輪縮放
+            canvas.addEventListener('wheel', (e) => {
+                if (!customModel) return;
+                e.preventDefault(); // 防止網頁捲動
+
+                const scaleSpeed = 0.001;
+                // 限制縮放範圍，避免消失或過大
+                const minScale = 1.0;
+                const maxScale = 100.0;
+
+                // 根據滾輪方向計算係數
+                // e.deltaY > 0 是滾輪向下(縮小)，< 0 是向上(放大)
+                let scaleFactor = 1 - e.deltaY * scaleSpeed;
+
+                // 套用縮放
+                const newScaleX = customModel.scale.x * scaleFactor;
+
+                // 簡單檢查範圍 (只檢查X軸作為代表)
+                if (newScaleX > minScale && newScaleX < maxScale) {
+                    customModel.scale.multiplyScalar(scaleFactor);
+                }
+            }, { passive: false });
+
+
+            // --- 觸控事件 (支援單指旋轉，雙指縮放) ---
+            canvas.addEventListener('touchstart', (e) => {
+                if (e.touches.length === 1) {
+                    isDragging = true;
+                    previousMousePosition = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+                } else if (e.touches.length === 2) {
+                    isDragging = false; // 雙指時停止旋轉
+                    // 計算初始雙指距離
+                    const dx = e.touches[0].clientX - e.touches[1].clientX;
+                    const dy = e.touches[0].clientY - e.touches[1].clientY;
+                    lastTouchDistance = Math.sqrt(dx * dx + dy * dy);
+                }
+            }, { passive: false });
+
+            canvas.addEventListener('touchmove', (e) => {
+                if (!customModel) return;
+                e.preventDefault(); // 防止滑動頁面
+
+                if (e.touches.length === 1 && isDragging) {
+                    // 單指旋轉
+                    const deltaMove = {
+                        x: e.touches[0].clientX - previousMousePosition.x,
+                        y: e.touches[0].clientY - previousMousePosition.y
+                    };
+
+                    const rotateSpeed = 0.005;
+                    customModel.rotation.y += deltaMove.x * rotateSpeed;
+                    customModel.rotation.x += deltaMove.y * rotateSpeed;
+
+                    previousMousePosition = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+
+                } else if (e.touches.length === 2) {
+                    // 雙指縮放
+                    const dx = e.touches[0].clientX - e.touches[1].clientX;
+                    const dy = e.touches[0].clientY - e.touches[1].clientY;
+                    const currentDistance = Math.sqrt(dx * dx + dy * dy);
+
+                    if (lastTouchDistance > 0) {
+                        const scaleFactor = currentDistance / lastTouchDistance;
+
+                        // 稍微平滑化縮放
+                        const smoothFactor = 1 + (scaleFactor - 1) * 0.8;
+
+                        const minScale = 1.0;
+                        const maxScale = 100.0;
+                        const newScaleX = customModel.scale.x * smoothFactor;
+
+                        if (newScaleX > minScale && newScaleX < maxScale) {
+                            customModel.scale.multiplyScalar(smoothFactor);
+                        }
+                    }
+                    lastTouchDistance = currentDistance;
+                }
+            }, { passive: false });
+
+            canvas.addEventListener('touchend', () => {
+                isDragging = false;
+                lastTouchDistance = 0;
+            });
         }
 
         // === 核心渲染迴圈 ===
@@ -150,12 +268,10 @@
                 document.getElementById('hy').innerText = headPos.y.toFixed(2);
             }
 
-            // 更新模型自轉 (如果需要可以取消註解)
-            // updateSceneAnimations();
-            if (customModel) {
-                customModel.rotation.y = 0.8; // 固定角度或自轉
-                // customModel.rotation.y += 0.005; 
-            }
+            // --- 注意：已移除原本的自動旋轉，改由使用者手動控制 ---
+            // if (customModel) {
+            //      customModel.rotation.y = 0.8; 
+            // }
 
             const windowWidth = window.innerWidth;
             const windowHeight = window.innerHeight;
