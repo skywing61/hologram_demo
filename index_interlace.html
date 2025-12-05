@@ -4,14 +4,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dual-Eye Off-Axis (2D/3D Switch)</title>
+    <title>Dual-Eye Off-Axis (Eye Tracking)</title>
     <style>
         body {
             margin: 0;
             overflow: hidden;
-            background-color: #fff;
+            background-color: #000;
             touch-action: none;
-            /* Critical for touch */
         }
 
         #loading {
@@ -22,6 +21,28 @@
             color: #888;
             font-family: monospace;
             font-size: 1.2rem;
+            z-index: 10;
+        }
+
+        /* 隱藏 Webcam 預覽畫面，只用於運算 */
+        #webcam {
+            position: absolute;
+            top: 0;
+            left: 0;
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        /* 顯示狀態指示器 */
+        #status {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            color: lime;
+            font-family: monospace;
+            z-index: 20;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 5px;
         }
     </style>
 
@@ -37,26 +58,43 @@
 
 <body>
 
-    <div id="loading">Loading Model...</div>
+    <div id="loading">Loading Model & AI...</div>
+    <div id="status">Waiting for camera...</div>
+    <video id="webcam" autoplay playsinline></video>
 
     <script type="module">
         import * as THREE from 'three';
         import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-
-        // interlace
         import { LenticularInterlacer } from './LenticularInterlacer.js';
+
+        // --- MEDIAPIPE IMPORTS ---
+        import { FilesetResolver, FaceLandmarker } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/vision_bundle.js";
 
         // --- GLOBAL VARIABLES ---
         let scene, renderer, camera, customModel;
         let interlacer;
+        let faceLandmarker;
+        let webcamElement;
+        let lastVideoTime = -1;
+
+        // Tracking smoothing
+        const smoothFactor = 0.1; // 0.0 ~ 1.0 (越小越平滑但延遲越高)
+        let currentEyeX = 0.5;
+        let currentEyeY = 0.5;
+
+        // Phase Tracking Config
+        const PHASE_TRACKING_FACTOR = 0.5;
 
         // lenticular setting
-        const SCREEN_DPI = 326;
-        const LENTICULAR_LPI = 79.0;
-        const LENTICULAR_ANGLE = -6.0;
+        const PANEL_RES_X = 1536;
+        const PANEL_WIDTH_MM = 147.456;
+        const SCREEN_DPI = (PANEL_RES_X / PANEL_WIDTH_MM) * 25.4;
+        const LENTICULAR_LPI = 80.0;
+        const LENTICULAR_ANGLE = -10.755;
+        const LENTICULAR_PHASE = 0.2;
 
         // State flags
-        let is3DMode = true; // Default to 3D split-screen
+        let is3DMode = true;
         let isDragging = false;
         let isPanning = false;
 
@@ -66,24 +104,31 @@
         let lastTouchCenter = { x: 0, y: 0 };
 
         // Configuration
-        // 4:3
         const SCREEN_WIDTH = 12;
         let virtualScreenHeight = 16;
         const OBSERVER_DIST = 10;
-        const EYE_SEP = 1.2;
+        const EYE_SEP = 3.0;
 
         // Head Position
         const headPos = new THREE.Vector3(0, 0, OBSERVER_DIST);
         const targetHeadPos = new THREE.Vector3(0, 0, OBSERVER_DIST);
 
-        init();
-        animate();
+        // --- INIT SEQUENCE ---
+        async function startApp() {
+            initThree();
+            await initMediaPipe();
+            startCamera();
+            animate();
+        }
 
-        function init() {
+        startApp();
+
+        // --- THREE.JS INIT ---
+        function initThree() {
             renderer = new THREE.WebGLRenderer({ antialias: true });
             renderer.setSize(window.innerWidth, window.innerHeight);
             renderer.setPixelRatio(window.devicePixelRatio);
-            renderer.setScissorTest(true); // Must be enabled for split screen
+            renderer.setScissorTest(true);
             document.body.appendChild(renderer.domElement);
 
             scene = new THREE.Scene();
@@ -91,87 +136,164 @@
 
             camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
 
-            // Lighting
             scene.add(new THREE.AmbientLight(0xffffff, 0.7));
             const dirLight = new THREE.DirectionalLight(0xffffff, 2);
             dirLight.position.set(5, 10, 7);
             scene.add(dirLight);
 
-            // interlacer initialize
-            interlacer = new LenticularInterlacer(renderer, SCREEN_DPI, LENTICULAR_LPI, LENTICULAR_ANGLE);
+            interlacer = new LenticularInterlacer(
+                renderer, SCREEN_DPI, LENTICULAR_LPI, LENTICULAR_ANGLE, LENTICULAR_PHASE
+            );
 
             updateScreenDims();
             loadModel();
             addInputListeners();
             window.addEventListener('resize', onResize);
-
             onResize();
         }
 
-        // --- ANDROID INTERFACES ---
-        const sensitivity = 2.0;
+        // --- MEDIAPIPE INIT ---
+        async function initMediaPipe() {
+            const filesetResolver = await FilesetResolver.forVisionTasks(
+                "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
+            );
+            faceLandmarker = await FaceLandmarker.createFromOptions(filesetResolver, {
+                baseOptions: {
+                    modelAssetPath: `https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task`,
+                    delegate: "GPU"
+                },
+                outputFaceBlendshapes: false,
+                runningMode: "VIDEO",
+                numFaces: 1
+            });
+            console.log("MediaPipe Initialized");
+        }
 
-        // Head Tracking Update
+        // --- CAMERA SETUP ---
+        function startCamera() {
+            webcamElement = document.getElementById("webcam");
+            const statusDiv = document.getElementById("status");
+
+            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } })
+                    .then(function (stream) {
+                        webcamElement.srcObject = stream;
+                        webcamElement.addEventListener("loadeddata", () => {
+                            statusDiv.innerText = "Tracking Active";
+                            document.getElementById('loading').style.display = 'none';
+                        });
+                    })
+                    .catch(function (error) {
+                        console.error("Camera Error:", error);
+                        statusDiv.innerText = "Camera Access Denied";
+                    });
+            } else {
+                statusDiv.innerText = "Camera not supported";
+            }
+        }
+
+        // --- TRACKING LOGIC ---
+        function predictWebcam() {
+            if (!faceLandmarker || !webcamElement || webcamElement.paused || webcamElement.ended) return;
+
+            let startTimeMs = performance.now();
+            if (lastVideoTime !== webcamElement.currentTime) {
+                lastVideoTime = webcamElement.currentTime;
+
+                const results = faceLandmarker.detectForVideo(webcamElement, startTimeMs);
+
+                if (results.faceLandmarks && results.faceLandmarks.length > 0) {
+                    const landmarks = results.faceLandmarks[0];
+
+                    // 左眼瞳孔中心點 (索引 468 是左眼虹膜中心)
+                    // MediaPipe 座標: x (0~1, 左到右), y (0~1, 上到下)
+                    // 注意：相機通常是鏡像的，這裡我們直接用原始 x
+                    // 如果覺得方向反了，可以用 (1.0 - landmarks[468].x)
+                    const rawX = 1.0 - landmarks[468].x; // 鏡像翻轉，讓移動方向自然
+                    const rawY = landmarks[468].y;
+
+                    // 平滑化
+                    currentEyeX += (rawX - currentEyeX) * smoothFactor;
+                    currentEyeY += (rawY - currentEyeY) * smoothFactor;
+
+                    // 呼叫原本的更新函數
+                    updateHeadPosition(currentEyeX, currentEyeY);
+
+                    document.getElementById("status").innerText =
+                        `Eye: (${currentEyeX.toFixed(2)}, ${currentEyeY.toFixed(2)})`;
+                } else {
+                    document.getElementById("status").innerText = "No Face Detected";
+                }
+            }
+        }
+
+        // --- ANDROID / TRACKING INTERFACES ---
+        const sensitivity = 5.0; // 追蹤靈敏度 (根據相機視角調整)
+
         window.updateHeadPosition = function (x, y) {
+            // x, y 為 0~1 的歸一化座標 (0.5 為中心)
+            // 轉換為 3D 空間座標
             const rangeX = SCREEN_WIDTH * sensitivity;
             const rangeY = virtualScreenHeight * sensitivity;
-            targetHeadPos.x = (0.5 - x) * rangeX;
-            targetHeadPos.y = (0.5 - y) * rangeY;
+
+            targetHeadPos.x = (x - 0.5) * rangeX;
+            targetHeadPos.y = -(y - 0.5) * rangeY; // Y 軸通常相反 (相機下是 1，3D下是負)
         };
 
-        // 2D/3D Mode Switch
         window.switchMode = function (is3D) {
-            // Handle boolean or string input just in case
             is3DMode = (is3D === true || is3D === "true");
-            console.log("Mode switched to:", is3DMode ? "3D" : "2D");
         };
 
         // --- RENDER LOOP ---
         function animate() {
             requestAnimationFrame(animate);
+
+            // 1. 執行 AI 偵測
+            predictWebcam();
+
+            // 2. 更新頭部位置與相位
             headPos.lerp(targetHeadPos, 0.1);
+            let dynamicPhase = LENTICULAR_PHASE + (headPos.x * PHASE_TRACKING_FACTOR);
+
+            interlacer.updateConfig(
+                SCREEN_DPI,
+                LENTICULAR_LPI,
+                LENTICULAR_ANGLE,
+                dynamicPhase
+            );
 
             const w = window.innerWidth;
             const h = window.innerHeight;
 
             if (is3DMode) {
-                // --- 3D MODE: Split Screen ---
-
-                // Left Eye (Left half)
+                // Left Eye
                 renderer.setRenderTarget(interlacer.rtLeft);
                 renderer.clear();
                 renderEye(headPos.x - (EYE_SEP / 2), 0, 0, w, h);
 
-                // Right Eye (Right half)
+                // Right Eye
                 renderer.setRenderTarget(interlacer.rtRight);
                 renderer.clear();
                 renderEye(headPos.x + (EYE_SEP / 2), 0, 0, w, h);
 
                 renderer.setRenderTarget(null);
                 renderer.setScissorTest(false);
-
-                // interlace render
                 interlacer.render();
             } else {
-                // --- 2D MODE: Full Screen (Left Eye Only) ---
-                // We use the Left Eye view but map it to the full window width
                 renderer.setRenderTarget(null);
                 renderer.setScissorTest(false);
-
                 renderer.clear();
                 renderEye(headPos.x - (EYE_SEP / 2), 0, 0, w, h);
             }
         }
 
-        function renderEye(eyeX, viewportX, viewportY, viewportW, viewportH) {
-            // Update camera matrix for Off-Axis projection
-            updateOffAxisProjection(camera, eyeX, headPos.y, headPos.z);
+        // ... (以下 renderEye, loadModel, Input Handlers 保持不變，直接複製即可) ...
 
-            // Set viewport and scissor for this pass
+        function renderEye(eyeX, viewportX, viewportY, viewportW, viewportH) {
+            updateOffAxisProjection(camera, eyeX, headPos.y, headPos.z);
             renderer.setViewport(viewportX, viewportY, viewportW, viewportH);
             renderer.setScissor(viewportX, viewportY, viewportW, viewportH);
             renderer.setScissorTest(true);
-
             renderer.render(scene, camera);
         }
 
@@ -179,21 +301,16 @@
             cam.position.set(eyeX, eyeY, eyeZ);
             cam.rotation.set(0, 0, 0);
             cam.updateMatrixWorld();
-
-            const near = 0.1;
-            const far = 1000;
+            const near = 0.1; const far = 1000;
             const safeZ = Math.max(eyeZ, 0.1);
             const ratio = near / safeZ;
-
             const left = (-SCREEN_WIDTH / 2 - eyeX) * ratio;
             const right = (SCREEN_WIDTH / 2 - eyeX) * ratio;
             const top = (virtualScreenHeight / 2 - eyeY) * ratio;
             const bottom = (-virtualScreenHeight / 2 - eyeY) * ratio;
-
             cam.projectionMatrix.makePerspective(left, right, top, bottom, near, far);
         }
 
-        // --- HELPER FUNCTIONS ---
         function updateScreenDims() {
             const aspect = window.innerHeight / window.innerWidth;
             virtualScreenHeight = SCREEN_WIDTH * aspect;
@@ -203,11 +320,8 @@
             const w = window.innerWidth;
             const h = window.innerHeight;
             renderer.setSize(w, h);
-
-            // notify interlacer adjust size
             const dpr = window.devicePixelRatio;
             interlacer.setSize(w * dpr, h * dpr);
-
             updateScreenDims();
         }
 
@@ -216,96 +330,38 @@
             loader.load('./source/Seen_low_2K.glb', (gltf) => {
                 customModel = gltf.scene;
                 customModel.scale.set(30, 30, 30);
-                customModel.position.set(0, -2, -6);
+                customModel.position.set(1, -2, -6);
                 customModel.rotation.y = 0.8;
                 scene.add(customModel);
                 document.getElementById('loading').style.display = 'none';
             });
         }
 
-        // --- INPUT HANDLERS (Rotate, Zoom, Pan) ---
         function addInputListeners() {
             const cvs = renderer.domElement;
-
-            // Mouse
-            cvs.addEventListener('mousedown', e => {
-                prevMouse = { x: e.offsetX, y: e.offsetY };
-                if (e.button === 0) isDragging = true;
-                else if (e.button === 1) { isPanning = true; e.preventDefault(); }
-            });
-
+            cvs.addEventListener('mousedown', e => { prevMouse = { x: e.offsetX, y: e.offsetY }; if (e.button === 0) isDragging = true; else if (e.button === 1) { isPanning = true; e.preventDefault(); } });
             cvs.addEventListener('mouseup', () => { isDragging = false; isPanning = false; });
             cvs.addEventListener('mouseleave', () => { isDragging = false; isPanning = false; });
-
             cvs.addEventListener('mousemove', e => {
-                const deltaX = e.offsetX - prevMouse.x;
-                const deltaY = e.offsetY - prevMouse.y;
-                if (isDragging) handleRotate(deltaX, deltaY);
-                else if (isPanning) handlePan(deltaX, deltaY);
+                const deltaX = e.offsetX - prevMouse.x; const deltaY = e.offsetY - prevMouse.y;
+                if (isDragging) handleRotate(deltaX, deltaY); else if (isPanning) handlePan(deltaX, deltaY);
                 prevMouse = { x: e.offsetX, y: e.offsetY };
             });
-
             cvs.addEventListener('wheel', e => handleZoom(e.deltaY), { passive: false });
-
-            // Touch
             cvs.addEventListener('touchstart', e => {
-                if (e.touches.length === 1) {
-                    isDragging = true; isPanning = false;
-                    prevMouse = { x: e.touches[0].clientX, y: e.touches[0].clientY };
-                } else if (e.touches.length === 2) {
-                    isDragging = false; isPanning = true;
-                    const dx = e.touches[0].clientX - e.touches[1].clientX;
-                    const dy = e.touches[0].clientY - e.touches[1].clientY;
-                    lastTouchDist = Math.sqrt(dx * dx + dy * dy);
-                    lastTouchCenter = {
-                        x: (e.touches[0].clientX + e.touches[1].clientX) / 2,
-                        y: (e.touches[0].clientY + e.touches[1].clientY) / 2
-                    };
-                }
+                if (e.touches.length === 1) { isDragging = true; isPanning = false; prevMouse = { x: e.touches[0].clientX, y: e.touches[0].clientY }; }
+                else if (e.touches.length === 2) { isDragging = false; isPanning = true; const dx = e.touches[0].clientX - e.touches[1].clientX; const dy = e.touches[0].clientY - e.touches[1].clientY; lastTouchDist = Math.sqrt(dx * dx + dy * dy); lastTouchCenter = { x: (e.touches[0].clientX + e.touches[1].clientX) / 2, y: (e.touches[0].clientY + e.touches[1].clientY) / 2 }; }
             }, { passive: false });
-
             cvs.addEventListener('touchmove', e => {
                 e.preventDefault();
-                if (e.touches.length === 1 && isDragging) {
-                    const deltaX = e.touches[0].clientX - prevMouse.x;
-                    const deltaY = e.touches[0].clientY - prevMouse.y;
-                    handleRotate(deltaX, deltaY);
-                    prevMouse = { x: e.touches[0].clientX, y: e.touches[0].clientY };
-                } else if (e.touches.length === 2 && isPanning) {
-                    const dx = e.touches[0].clientX - e.touches[1].clientX;
-                    const dy = e.touches[0].clientY - e.touches[1].clientY;
-                    const currentDist = Math.sqrt(dx * dx + dy * dy);
-                    if (lastTouchDist > 0) handleZoom((lastTouchDist - currentDist) * 5);
-                    lastTouchDist = currentDist;
-
-                    const currentCenterX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
-                    const currentCenterY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
-                    handlePan(currentCenterX - lastTouchCenter.x, currentCenterY - lastTouchCenter.y);
-                    lastTouchCenter = { x: currentCenterX, y: currentCenterY };
-                }
+                if (e.touches.length === 1 && isDragging) { const deltaX = e.touches[0].clientX - prevMouse.x; const deltaY = e.touches[0].clientY - prevMouse.y; handleRotate(deltaX, deltaY); prevMouse = { x: e.touches[0].clientX, y: e.touches[0].clientY }; }
+                else if (e.touches.length === 2 && isPanning) { const dx = e.touches[0].clientX - e.touches[1].clientX; const dy = e.touches[0].clientY - e.touches[1].clientY; const currentDist = Math.sqrt(dx * dx + dy * dy); if (lastTouchDist > 0) handleZoom((lastTouchDist - currentDist) * 5); lastTouchDist = currentDist; const currentCenterX = (e.touches[0].clientX + e.touches[1].clientX) / 2; const currentCenterY = (e.touches[0].clientY + e.touches[1].clientY) / 2; handlePan(currentCenterX - lastTouchCenter.x, currentCenterY - lastTouchCenter.y); lastTouchCenter = { x: currentCenterX, y: currentCenterY }; }
             }, { passive: false });
-
             cvs.addEventListener('touchend', () => { isDragging = false; isPanning = false; lastTouchDist = 0; });
         }
-
-        function handleRotate(dx, dy) {
-            if (!customModel) return;
-            customModel.rotation.y += dx * 0.005;
-            customModel.rotation.x += dy * 0.005;
-        }
-
-        function handlePan(dx, dy) {
-            if (!customModel) return;
-            customModel.position.x += dx * 0.02;
-            customModel.position.y -= dy * 0.02;
-        }
-
-        function handleZoom(delta) {
-            if (!customModel) return;
-            const scaleFactor = 1 - delta * 0.001;
-            const newScale = customModel.scale.x * scaleFactor;
-            if (newScale > 0.1 && newScale < 100) customModel.scale.multiplyScalar(scaleFactor);
-        }
+        function handleRotate(dx, dy) { if (!customModel) return; customModel.rotation.y += dx * 0.005; customModel.rotation.x += dy * 0.005; }
+        function handlePan(dx, dy) { if (!customModel) return; customModel.position.x += dx * 0.02; customModel.position.y -= dy * 0.02; }
+        function handleZoom(delta) { if (!customModel) return; const scaleFactor = 1 - delta * 0.001; const newScale = customModel.scale.x * scaleFactor; if (newScale > 0.1 && newScale < 100) customModel.scale.multiplyScalar(scaleFactor); }
     </script>
 </body>
 
