@@ -2,7 +2,9 @@
 <html lang="en">
 
 <head>
+
     <meta charset="UTF-8">
+
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Dual-Eye Off-Axis (2D/3D Switch)</title>
     <style>
@@ -29,13 +31,23 @@
         {
             "imports": {
                 "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+                 "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+                }
             }
-        }
-    </script>
+         </script>
 </head>
 
 <body>
+    <script>
+        window.updateHeadPosition = function (x, y) {
+
+        };
+
+        window.switchMode = function (is3D) {
+
+        };
+
+    </script>
 
     <div id="loading">Loading Model...</div>
 
@@ -57,10 +69,11 @@
         let lastTouchCenter = { x: 0, y: 0 };
 
         // Configuration
-        const SCREEN_WIDTH = 20;
-        const OBSERVER_DIST = 15;
+        // 16:9
+        const SCREEN_WIDTH = 16;
+        let virtualScreenHeight = 9;
+        const OBSERVER_DIST = 12;
         const EYE_SEP = 1.2;
-        let virtualScreenHeight = 11.25;
 
         // Head Position
         const headPos = new THREE.Vector3(0, 0, OBSERVER_DIST);
@@ -94,10 +107,10 @@
         }
 
         // --- ANDROID INTERFACES ---
+        const sensitivity = 2.0;
 
         // Head Tracking Update
         window.updateHeadPosition = function (x, y) {
-            const sensitivity = 2.0;
             const rangeX = SCREEN_WIDTH * sensitivity;
             const rangeY = virtualScreenHeight * sensitivity;
             targetHeadPos.x = (0.5 - x) * rangeX;
