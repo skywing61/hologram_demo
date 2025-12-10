@@ -2,18 +2,18 @@
 <html lang="en">
 
 <head>
-
     <meta charset="UTF-8">
-
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Dual-Eye Off-Axis (2D/3D Switch)</title>
+
     <style>
         body {
             margin: 0;
             overflow: hidden;
+            /* Prevent scrollbars */
             background-color: #fff;
             touch-action: none;
-            /* Critical for touch */
+            /* CRITICAL: Disables browser default zooming/panning to allow custom gestures */
         }
 
         #loading {
@@ -24,6 +24,7 @@
             color: #888;
             font-family: monospace;
             font-size: 1.2rem;
+            text-align: center;
         }
     </style>
 
@@ -33,22 +34,22 @@
         {
             "imports": {
                 "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-                 "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
-                }
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
             }
-         </script>
+        }
+    </script>
 </head>
 
 <body>
+
     <script>
         window.updateHeadPosition = function (x, y) {
-
+            // Placeholder: waits for module to load
         };
 
         window.switchMode = function (is3D) {
-
+            // Placeholder: waits for module to load
         };
-
     </script>
 
     <div id="loading">Loading Model...</div>
@@ -60,40 +61,42 @@
         // --- GLOBAL VARIABLES ---
         let scene, renderer, camera, customModel;
 
-        // State flags
-        let is3DMode = true; // Default to 3D split-screen
+        // State & Configuration
+        let is3DMode = true;
+        const SCREEN_WIDTH = 16;      // Physical width units (arbitrary scale)
+        let virtualScreenHeight = 9;  // Calculated based on aspect ratio
+        const OBSERVER_DIST = 12;     // Distance of camera Z
+        const EYE_SEP = 1.2;          // Distance between eyes (IPD)
+        const sensitivity = 2.0;      // Head tracking multiplier
+
+        // Tracking Vectors
+        const headPos = new THREE.Vector3(0, 0, OBSERVER_DIST);
+        const targetHeadPos = new THREE.Vector3(0, 0, OBSERVER_DIST);
+
+        // Input State
         let isDragging = false;
         let isPanning = false;
-
-        // Input tracking
         let prevMouse = { x: 0, y: 0 };
         let lastTouchDist = 0;
         let lastTouchCenter = { x: 0, y: 0 };
 
-        // Configuration
-        // 16:9
-        const SCREEN_WIDTH = 16;
-        let virtualScreenHeight = 9;
-        const OBSERVER_DIST = 12;
-        const EYE_SEP = 1.2;
-
-        // Head Position
-        const headPos = new THREE.Vector3(0, 0, OBSERVER_DIST);
-        const targetHeadPos = new THREE.Vector3(0, 0, OBSERVER_DIST);
-
         init();
         animate();
 
+        // --- INITIALIZATION ---
         function init() {
+            // Renderer Setup
             renderer = new THREE.WebGLRenderer({ antialias: true });
             renderer.setSize(window.innerWidth, window.innerHeight);
             renderer.setPixelRatio(window.devicePixelRatio);
-            renderer.setScissorTest(true); // Must be enabled for split screen
+            renderer.setScissorTest(true); // REQUIRED for split-screen rendering
             document.body.appendChild(renderer.domElement);
 
+            // Scene Setup
             scene = new THREE.Scene();
             scene.background = new THREE.Color(0xeeeeee);
 
+            // Camera Setup (Standard Perspective, matrix will be overwritten later)
             camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
 
             // Lighting
@@ -102,72 +105,84 @@
             dirLight.position.set(5, 10, 7);
             scene.add(dirLight);
 
+            // Helpers & Listeners
             updateScreenDims();
             loadModel();
             addInputListeners();
             window.addEventListener('resize', onResize);
+
+            // --- OVERWRITE STUB FUNCTIONS ---
+            // Now that Three.js is ready, we define the real logic for Android to call.
+
+            window.updateHeadPosition = function (x, y) {
+                const rangeX = SCREEN_WIDTH * sensitivity;
+                const rangeY = virtualScreenHeight * sensitivity;
+                // Invert X (0.5 - x) to match sensor direction if needed
+                targetHeadPos.x = (0.5 - x) * rangeX;
+                targetHeadPos.y = (0.5 - y) * rangeY;
+            };
+
+            window.switchMode = function (is3D) {
+                // Ensure type safety (string vs boolean)
+                is3DMode = (is3D === true || is3D === "true");
+                console.log("Mode switched to:", is3DMode ? "3D" : "2D");
+                onResize(); // Force redraw
+            };
         }
-
-        // --- ANDROID INTERFACES ---
-        const sensitivity = 2.0;
-
-        // Head Tracking Update
-        window.updateHeadPosition = function (x, y) {
-            const rangeX = SCREEN_WIDTH * sensitivity;
-            const rangeY = virtualScreenHeight * sensitivity;
-            targetHeadPos.x = (0.5 - x) * rangeX;
-            targetHeadPos.y = (0.5 - y) * rangeY;
-        };
-
-        // 2D/3D Mode Switch
-        window.switchMode = function (is3D) {
-            // Handle boolean or string input just in case
-            is3DMode = (is3D === true || is3D === "true");
-            console.log("Mode switched to:", is3DMode ? "3D" : "2D");
-        };
 
         // --- RENDER LOOP ---
         function animate() {
             requestAnimationFrame(animate);
+
+            // Smoothly interpolate head position
             headPos.lerp(targetHeadPos, 0.1);
 
             const w = window.innerWidth;
             const h = window.innerHeight;
 
             if (is3DMode) {
-                // --- 3D MODE: Split Screen ---
-                // Left Eye (Left half)
+                // === 3D MODE: Split Screen ===
+                // Render Left Eye (Left Half)
                 renderEye(headPos.x - (EYE_SEP / 2), 0, 0, w / 2, h);
-                // Right Eye (Right half)
+                // Render Right Eye (Right Half)
                 renderEye(headPos.x + (EYE_SEP / 2), w / 2, 0, w / 2, h);
             } else {
-                // --- 2D MODE: Full Screen (Left Eye Only) ---
-                // We use the Left Eye view but map it to the full window width
+                // === 2D MODE: Full Screen ===
+                // Use Left Eye logic but stretch to full width
                 renderEye(headPos.x - (EYE_SEP / 2), 0, 0, w, h);
             }
         }
 
+        // --- CORE RENDERING LOGIC ---
         function renderEye(eyeX, viewportX, viewportY, viewportW, viewportH) {
-            // Update camera matrix for Off-Axis projection
+            // 1. Calculate the Off-Axis Projection Matrix based on head position
             updateOffAxisProjection(camera, eyeX, headPos.y, headPos.z);
 
-            // Set viewport and scissor for this pass
+            // 2. Define which part of the screen to draw to
             renderer.setViewport(viewportX, viewportY, viewportW, viewportH);
             renderer.setScissor(viewportX, viewportY, viewportW, viewportH);
 
+            // 3. Render
             renderer.render(scene, camera);
         }
 
+        /**
+         * Calculates a custom projection matrix (Frustum)
+         * This creates the "Holographic" window effect where the scene looks correct
+         * from the user's specific head position.
+         */
         function updateOffAxisProjection(cam, eyeX, eyeY, eyeZ) {
             cam.position.set(eyeX, eyeY, eyeZ);
-            cam.rotation.set(0, 0, 0);
+            cam.rotation.set(0, 0, 0); // Camera always looks straight forward
             cam.updateMatrixWorld();
 
             const near = 0.1;
             const far = 1000;
+            // Prevent division by zero if Z is 0
             const safeZ = Math.max(eyeZ, 0.1);
             const ratio = near / safeZ;
 
+            // Calculate frustum bounds relative to the "virtual screen"
             const left = (-SCREEN_WIDTH / 2 - eyeX) * ratio;
             const right = (SCREEN_WIDTH / 2 - eyeX) * ratio;
             const top = (virtualScreenHeight / 2 - eyeY) * ratio;
@@ -176,7 +191,30 @@
             cam.projectionMatrix.makePerspective(left, right, top, bottom, near, far);
         }
 
-        // --- HELPER FUNCTIONS ---
+        // --- ASSET LOADING ---
+        function loadModel() {
+            const loader = new GLTFLoader();
+            loader.load(
+                './source/Seen_low_2K.glb',
+                (gltf) => {
+                    // Success
+                    customModel = gltf.scene;
+                    customModel.scale.set(30, 30, 30);
+                    customModel.position.set(-1, -2, -6);
+                    customModel.rotation.y = 0.8;
+                    scene.add(customModel);
+                    document.getElementById('loading').style.display = 'none';
+                },
+                undefined, // Progress (optional)
+                (error) => {
+                    // Error Handling
+                    console.error(error);
+                    document.getElementById('loading').innerText = "Error: " + error.message;
+                    document.getElementById('loading').style.color = "red";
+                }
+            );
+        }
+
         function updateScreenDims() {
             const aspect = window.innerHeight / window.innerWidth;
             virtualScreenHeight = SCREEN_WIDTH * aspect;
@@ -187,27 +225,15 @@
             updateScreenDims();
         }
 
-        function loadModel() {
-            const loader = new GLTFLoader();
-            loader.load('./source/Seen_low_2K.glb', (gltf) => {
-                customModel = gltf.scene;
-                customModel.scale.set(30, 30, 30);
-                customModel.position.set(-1, -2, -6);
-                customModel.rotation.y = 0.8;
-                scene.add(customModel);
-                document.getElementById('loading').style.display = 'none';
-            });
-        }
-
-        // --- INPUT HANDLERS (Rotate, Zoom, Pan) ---
+        // --- INPUT HANDLERS (Touch & Mouse) ---
         function addInputListeners() {
             const cvs = renderer.domElement;
 
-            // Mouse
+            // 1. Mouse Events
             cvs.addEventListener('mousedown', e => {
                 prevMouse = { x: e.offsetX, y: e.offsetY };
-                if (e.button === 0) isDragging = true;
-                else if (e.button === 1) { isPanning = true; e.preventDefault(); }
+                if (e.button === 0) isDragging = true; // Left Click = Rotate
+                else if (e.button === 1) { isPanning = true; e.preventDefault(); } // Middle Click = Pan
             });
 
             cvs.addEventListener('mouseup', () => { isDragging = false; isPanning = false; });
@@ -223,12 +249,14 @@
 
             cvs.addEventListener('wheel', e => handleZoom(e.deltaY), { passive: false });
 
-            // Touch
+            // 2. Touch Events
             cvs.addEventListener('touchstart', e => {
                 if (e.touches.length === 1) {
+                    // Single finger = Rotate
                     isDragging = true; isPanning = false;
                     prevMouse = { x: e.touches[0].clientX, y: e.touches[0].clientY };
                 } else if (e.touches.length === 2) {
+                    // Two fingers = Pan & Zoom
                     isDragging = false; isPanning = true;
                     const dx = e.touches[0].clientX - e.touches[1].clientX;
                     const dy = e.touches[0].clientY - e.touches[1].clientY;
@@ -241,19 +269,24 @@
             }, { passive: false });
 
             cvs.addEventListener('touchmove', e => {
-                e.preventDefault();
+                e.preventDefault(); // Prevent page scroll
+
                 if (e.touches.length === 1 && isDragging) {
                     const deltaX = e.touches[0].clientX - prevMouse.x;
                     const deltaY = e.touches[0].clientY - prevMouse.y;
                     handleRotate(deltaX, deltaY);
                     prevMouse = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+
                 } else if (e.touches.length === 2 && isPanning) {
                     const dx = e.touches[0].clientX - e.touches[1].clientX;
                     const dy = e.touches[0].clientY - e.touches[1].clientY;
                     const currentDist = Math.sqrt(dx * dx + dy * dy);
+
+                    // Zoom based on pinch distance change
                     if (lastTouchDist > 0) handleZoom((lastTouchDist - currentDist) * 5);
                     lastTouchDist = currentDist;
 
+                    // Pan based on center point movement
                     const currentCenterX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
                     const currentCenterY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
                     handlePan(currentCenterX - lastTouchCenter.x, currentCenterY - lastTouchCenter.y);
@@ -264,6 +297,7 @@
             cvs.addEventListener('touchend', () => { isDragging = false; isPanning = false; lastTouchDist = 0; });
         }
 
+        // --- MANIPULATION LOGIC ---
         function handleRotate(dx, dy) {
             if (!customModel) return;
             customModel.rotation.y += dx * 0.005;
@@ -280,6 +314,7 @@
             if (!customModel) return;
             const scaleFactor = 1 - delta * 0.001;
             const newScale = customModel.scale.x * scaleFactor;
+            // Clamp zoom levels
             if (newScale > 0.1 && newScale < 100) customModel.scale.multiplyScalar(scaleFactor);
         }
     </script>
