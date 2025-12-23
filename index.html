@@ -58,8 +58,10 @@
         import * as THREE from 'three';
         import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
+        import Stats from 'three/addons/libs/stats.module.js';
+
         // --- GLOBAL VARIABLES ---
-        let scene, renderer, camera, customModel;
+        let scene, renderer, camera, customModel, stats;
 
         // State & Configuration
         let is3DMode = true;
@@ -91,6 +93,10 @@
             renderer.setPixelRatio(window.devicePixelRatio);
             renderer.setScissorTest(true); // REQUIRED for split-screen rendering
             document.body.appendChild(renderer.domElement);
+
+            // Stats Setup
+            stats = new Stats();
+            document.body.appendChild(stats.dom);
 
             // Scene Setup
             scene = new THREE.Scene();
@@ -128,11 +134,21 @@
                 console.log("Mode switched to:", is3DMode ? "3D" : "2D");
                 onResize(); // Force redraw
             };
+
+            window.showFPS = function (isVisible) {
+                if (!stats) return;
+
+                // 確保轉為布林值
+                const show = (isVisible === true || isVisible === "true");
+                stats.dom.style.display = show ? 'block' : 'none';
+                console.log("FPS Display:", show);
+            };
         }
 
         // --- RENDER LOOP ---
         function animate() {
             requestAnimationFrame(animate);
+            stats.update();
 
             // Smoothly interpolate head position
             headPos.lerp(targetHeadPos, 0.1);
